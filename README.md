@@ -1,97 +1,225 @@
-## sdeb
+# sdeb
 
-Simple interactive helper for spawning SLURM shells via `srun`.
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://docs.astral.sh/uv/)
+[![SLURM](https://img.shields.io/badge/SLURM-compatible-green?logo=linux&logoColor=white)](https://slurm.schedmd.com/)
 
-### Install globally
+> Save SLURM `srun` defaults per project and launch interactive shells without retyping long commands.
 
-Without cloning the repo:
+`sdeb` is a small CLI for interactive SLURM sessions. It stores the account, partition, node, time, memory, CPU count, GPU request, and PTY command you normally pass to `srun`, then reuses them with one command.
 
-With `uv`:
+---
+
+## Why sdeb?
+
+Interactive SLURM commands get long quickly:
 
 ```bash
+srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
+```
+
+With `sdeb`, save that once as a project:
+
+```bash
+sdeb init myproj
+sdeb
+```
+
+Then override only what changes:
+
+```bash
+sdeb --time 01:00:00
+sdeb --gpu 2
+sdeb --cpu
+```
+
+---
+
+## Install
+
+No root. No `sudo`. Works anywhere Python can install command-line tools into your user environment.
+
+### uv recommended
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv itself once
 uv tool install git+https://github.com/e-candeloro/sdeb
 ```
 
-With `pipx`:
-
-```bash
-pipx install git+https://github.com/e-candeloro/sdeb
-```
-
-Upgrade:
+Upgrade later:
 
 ```bash
 uv tool upgrade sdeb
-pipx reinstall sdeb
 ```
 
-Development install (from a local checkout):
+### pipx
 
 ```bash
-pipx install .
-uv tool install -e .
+python3 -m pip install --user pipx
+pipx install git+https://github.com/e-candeloro/sdeb
 ```
 
-### Usage
-
-First, set defaults (saved in `~/.config/sdeb/config.json` or `$XDG_CONFIG_HOME/sdeb/config.json`).
-
-This supports multiple named projects; the first prompt is the project name.
+Upgrade later:
 
 ```bash
-sdeb set
+pipx upgrade sdeb
 ```
 
-Create a new project config (example):
+---
+
+## Quick Start
+
+Create a project. The SLURM account is required.
 
 ```bash
-sdeb set --project myproj
-# then type "myproj" at the first prompt (Project)
+sdeb init myproj
 ```
 
-List projects (active project is highlighted):
-
-```bash
-sdeb projects
-```
-
-Switch which project is active by default:
-
-```bash
-sdeb use myproj
-```
-
-Then spawn a SLURM `bash` using those defaults:
+Run the active project:
 
 ```bash
 sdeb
 ```
 
-Override only what you need for a single run:
-
-```bash
-sdeb --time 01:00:00
-sdeb --partition all_serial --no-gpu
-sdeb --gpus 2
-sdeb --node ailb-login-03 --cpus-per-task 16
-```
-
-Run using a specific (non-active) project without switching:
-
-```bash
-sdeb --project myproj
-```
-
-Preview the command without running it:
+Preview the exact `srun` command without launching it:
 
 ```bash
 sdeb --dry-run
 ```
 
-Delete/reset your saved config:
+Get task-oriented help:
 
 ```bash
-sdeb purge
-# alias:
-sdeb clean
+sdeb help
+sdeb project help
+```
+
+Saved projects live in `~/.config/sdeb/config.json` or `$XDG_CONFIG_HOME/sdeb/config.json`.
+
+---
+
+## Project Commands
+
+```bash
+sdeb project list                    # list projects; active project is marked with '*'
+sdeb project new gpu-test            # create from built-in defaults
+sdeb project edit myproj             # edit an existing project
+sdeb project copy myproj             # creates myproj-copy, or myproj-copy-2 if needed
+sdeb project copy myproj long-job    # copy to an explicit name
+sdeb project use myproj              # switch active project
+sdeb project remove myproj           # remove one project, with confirmation
+sdeb project remove --all            # remove all settings, with confirmation
+```
+
+Convenience aliases:
+
+```bash
+sdeb projects       # same as: sdeb project list
+sdeb use myproj     # same as: sdeb project use myproj
+sdeb purge          # same as: sdeb project remove --all
+sdeb clean          # same as: sdeb project remove --all
+```
+
+---
+
+## Run Overrides
+
+Use a project without switching the active project:
+
+```bash
+sdeb --project myproj
+```
+
+Override SLURM resources for a single run:
+
+```bash
+sdeb --partition all_serial
+sdeb --node ailb-login-02
+sdeb --account bolelli_synthetic
+sdeb --time 01:00:00
+sdeb --mem 16G
+sdeb --cpus-per-task 16
+```
+
+Choose CPU or GPU mode for a single run:
+
+```bash
+sdeb --cpu       # force CPU-only; no --gres is emitted
+sdeb --gpu       # force one GPU; emits --gres=gpu:1
+sdeb --gpu 2     # force two GPUs; emits --gres=gpu:2
+```
+
+Invalid combinations are rejected:
+
+```bash
+sdeb --cpu --gpu 2
+sdeb --gpu 0
+```
+
+Show the installed version:
+
+```bash
+sdeb --version
+```
+
+---
+
+## Generated SLURM Command
+
+A project configured with account `bolelli_synthetic`, partition `all_serial`, node `ailb-login-02`, 20 minutes, 8 GB RAM, 8 CPUs, and one GPU generates:
+
+```bash
+srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
+```
+
+CPU override removes the GPU request:
+
+```bash
+sdeb --cpu --dry-run
+# srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --pty bash
+```
+
+---
+
+## Safety
+
+- `sdeb project remove <name>` asks before deleting a project.
+- If the active project is removed, `sdeb` automatically activates another remaining project and lists what is left.
+- `sdeb project remove --all`, `sdeb purge`, and `sdeb clean` ask before deleting the config file.
+- `sdeb --dry-run` prints the command and never launches SLURM.
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/e-candeloro/sdeb
+cd sdeb
+uv tool install -e .
+sdeb help
+```
+
+Run from a checkout without installing:
+
+```bash
+PYTHONPATH=src python3 -m sdeb.cli help
+```
+
+Use a temporary config while testing:
+
+```bash
+XDG_CONFIG_HOME=/tmp/sdeb-test PYTHONPATH=src python3 -m sdeb.cli init test
+XDG_CONFIG_HOME=/tmp/sdeb-test PYTHONPATH=src python3 -m sdeb.cli --dry-run
+```
+
+---
+
+## Project Layout
+
+```text
+src/sdeb/
+├── __init__.py  # package version
+└── cli.py       # argument parsing, config, prompts, and srun command building
+README.md        # user documentation
+pyproject.toml   # package metadata and console script
 ```

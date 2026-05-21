@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from . import __version__
+except ImportError:  # pragma: no cover - supports direct script execution.
+    __version__ = "0.2.0"
+
 
 DEFAULT_PROJECT = "default"
 DEFAULTS = {
@@ -84,18 +89,39 @@ def _styled(text: str, sgr: str) -> str:
     return f"\x1b[{sgr}m{text}\x1b[0m"
 
 
+def _bold(text: str) -> str:
+    return _styled(text, "1")
+
+
+def _dim(text: str) -> str:
+    return _styled(text, "2")
+
+
+def _cmd_text(text: str) -> str:
+    return _styled(text, "1;36")
+
+
+def _warn_text(text: str) -> str:
+    return _styled(text, "1;33")
+
+
+def _ok_text(text: str) -> str:
+    return _styled(text, "1;32")
+
+
 def _config_path() -> Path:
     xdg_home = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg_home).expanduser() if xdg_home else (Path.home() / ".config")
     return base / "sdeb" / "config.json"
 
 
+def _empty_raw_config() -> dict[str, Any]:
+    return {"active_project": "", "projects": {}}
+
+
 def _load_raw_config(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {
-            "active_project": DEFAULT_PROJECT,
-            "projects": {DEFAULT_PROJECT: dict(DEFAULTS)},
-        }
+        return _empty_raw_config()
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -111,10 +137,7 @@ def _load_raw_config(path: Path) -> dict[str, Any]:
 
     active_project = data.get("active_project")
     if not isinstance(active_project, str) or not active_project:
-        active_project = DEFAULT_PROJECT
-
-    if DEFAULT_PROJECT not in projects:
-        projects[DEFAULT_PROJECT] = dict(DEFAULTS)
+        active_project = ""
 
     return {
         "active_project": active_project,
@@ -141,7 +164,7 @@ def _get_project_config(raw: dict[str, Any], project: str) -> ProjectConfig:
     project_data = projects.get(project)
     if project_data is None:
         raise SystemExit(
-            f"Project '{project}' not found in config. Run 'sdeb set' first."
+            f"Project '{project}' not found. Run 'sdeb init {project}' to create it."
         )
     if not isinstance(project_data, dict):
         raise SystemExit(f"Project '{project}' config must be an object")
@@ -158,6 +181,14 @@ def _prompt_string(label: str, default: str) -> str:
         prompt = f"{prefix}{label_txt}: "
     value = input(prompt).strip()
     return value if value else default
+
+
+def _prompt_required_string(label: str, default: str) -> str:
+    while True:
+        value = _prompt_string(label, default).strip()
+        if value:
+            return value
+        print("This value is required.")
 
 
 def _prompt_int(label: str, default: int) -> int:
@@ -270,7 +301,9 @@ def _normalize_mem(value: str) -> str:
 
 def build_srun_command(cfg: ProjectConfig) -> list[str]:
     if not cfg.partition:
-        raise SystemExit("Missing partition. Run 'sdeb set' or pass --partition.")
+        raise SystemExit("Missing partition. Run 'sdeb init' or pass --partition.")
+    if not cfg.account:
+        raise SystemExit("Missing account. Run 'sdeb project edit <project>' or pass --account.")
 
     cmd: list[str] = [
         "srun",
@@ -280,8 +313,7 @@ def build_srun_command(cfg: ProjectConfig) -> list[str]:
     if cfg.node:
         cmd.extend(["-w", cfg.node])
 
-    if cfg.account:
-        cmd.append(f"--account={cfg.account}")
+    cmd.append(f"--account={cfg.account}")
 
     if cfg.time:
         cmd.append(f"--time={cfg.time}")
@@ -300,148 +332,317 @@ def build_srun_command(cfg: ProjectConfig) -> list[str]:
     return cmd
 
 
-def _cmd_set(args: argparse.Namespace) -> int:
-    path = _config_path()
-    raw = _load_raw_config(path)
+def _prompt_project_name(default: str) -> str:
+    while True:
+        project = _prompt_string("Project name", default).strip()
+        if project:
+            return project
+        print("Please enter a project name.")
 
-    active_project = raw["active_project"]
-    projects: dict[str, Any] = raw["projects"]
 
-    default_project = args.project or str(active_project)
-    project = _prompt_string("Project", default_project)
+def _configure_project(name: str, base_cfg: ProjectConfig, title: str) -> ProjectConfig:
+    print(_cmd_text(title))
+    print(_dim(f"Project: {name}"))
+    print()
 
-    base_cfg: ProjectConfig
-    if project in projects and isinstance(projects[project], dict):
-        base_cfg = ProjectConfig.from_dict(projects[project])
-    else:
-        base_cfg = ProjectConfig.from_dict(projects.get(active_project, {}))
-
-    new_cfg = ProjectConfig(
-        account=_prompt_string("Account (--account)", base_cfg.account),
-        partition=_prompt_string("Partition (--partition)", base_cfg.partition),
-        node=_prompt_string("Node (-w) [blank for auto]", ""),
-        time=_prompt_string("Time (--time)", base_cfg.time),
-        mem=_normalize_mem(_prompt_string("Mem (--mem)", base_cfg.mem)),
-        cpus_per_task=_prompt_int(
-            "CPUs per task (--cpus-per-task)", base_cfg.cpus_per_task
-        ),
-        gpu=_prompt_bool("Use GPU?", base_cfg.gpu),
-        gpus=1,
-        pty_command=_prompt_string("PTY command", base_cfg.pty_command),
+    account = _prompt_required_string("Account (--account)", base_cfg.account)
+    partition = _prompt_string("Partition (--partition)", base_cfg.partition)
+    node = _prompt_string("Node (-w) [blank for auto]", base_cfg.node)
+    time = _prompt_string("Time (--time)", base_cfg.time)
+    mem = _normalize_mem(_prompt_string("Mem (--mem)", base_cfg.mem))
+    cpus_per_task = _prompt_int(
+        "CPUs per task (--cpus-per-task)", base_cfg.cpus_per_task
     )
-
-    if new_cfg.gpu:
+    gpu = _prompt_bool("Use GPU?", base_cfg.gpu)
+    gpus = 1
+    if gpu:
         default_gpus = base_cfg.gpus if base_cfg.gpu else 1
-        gpus = _prompt_int("How many GPUs (--gpus)", default_gpus)
+        gpus = _prompt_int("How many GPUs (--gpu)", default_gpus)
         if gpus <= 0:
             gpus = 1
-        new_cfg = ProjectConfig(
-            account=new_cfg.account,
-            partition=new_cfg.partition,
-            node=new_cfg.node,
-            time=new_cfg.time,
-            mem=new_cfg.mem,
-            cpus_per_task=new_cfg.cpus_per_task,
-            gpu=new_cfg.gpu,
-            gpus=gpus,
-            pty_command=new_cfg.pty_command,
+
+    pty_command = _prompt_string("PTY command", base_cfg.pty_command)
+
+    return ProjectConfig(
+        account=account,
+        partition=partition,
+        node=node,
+        time=time,
+        mem=mem,
+        cpus_per_task=cpus_per_task,
+        gpu=gpu,
+        gpus=gpus,
+        pty_command=pty_command,
+    )
+
+
+def _cmd_project_new(args: argparse.Namespace) -> int:
+    path = _config_path()
+    raw = _load_raw_config(path)
+    projects: dict[str, Any] = raw["projects"]
+
+    project = str(args.name).strip() if args.name else _prompt_project_name(DEFAULT_PROJECT)
+    if project in projects:
+        raise SystemExit(
+            f"Project '{project}' already exists. Use 'sdeb project edit {project}' "
+            f"or 'sdeb project copy {project} [new-name]'."
         )
+
+    new_cfg = _configure_project(project, ProjectConfig.from_dict({}), "Create project")
 
     projects[project] = new_cfg.to_dict()
     raw["active_project"] = project
     raw["projects"] = projects
-
     _save_raw_config(path, raw)
 
-    print(f"Saved project '{project}' to {path}")
-    print(f"Active project is now '{project}'")
+    print(_ok_text(f"Saved project '{project}'"))
+    print(f"Active project is now {_ok_text(project)}")
+    print(_dim(f"Config: {path}"))
     return 0
 
 
-def _cmd_purge(args: argparse.Namespace) -> int:
-    del args
+def _cmd_project_edit(args: argparse.Namespace) -> int:
     path = _config_path()
     if not path.exists():
-        print(f"No config found at {path}")
+        raise SystemExit(f"No config found at {path}. Run 'sdeb init' first.")
+
+    raw = _load_raw_config(path)
+    projects = raw.get("projects")
+    if not isinstance(projects, dict):
+        raise SystemExit("Config is missing 'projects' object")
+
+    project = str(args.name)
+    if project not in projects:
+        raise SystemExit(f"Project '{project}' not found. Run 'sdeb project new {project}' first.")
+
+    data = projects.get(project)
+    if not isinstance(data, dict):
+        raise SystemExit(f"Project '{project}' config must be an object")
+
+    new_cfg = _configure_project(project, ProjectConfig.from_dict(data), "Edit project")
+    projects[project] = new_cfg.to_dict()
+    raw["active_project"] = project
+    raw["projects"] = projects
+    _save_raw_config(path, raw)
+
+    print(_ok_text(f"Updated project '{project}'"))
+    print(f"Active project is now {_ok_text(project)}")
+    print(_dim(f"Config: {path}"))
+    return 0
+
+
+def _copy_name(source: str, projects: dict[str, Any]) -> str:
+    base = f"{source}-copy"
+    if base not in projects:
+        return base
+    index = 2
+    while f"{base}-{index}" in projects:
+        index += 1
+    return f"{base}-{index}"
+
+
+def _cmd_project_copy(args: argparse.Namespace) -> int:
+    path = _config_path()
+    if not path.exists():
+        raise SystemExit(f"No config found at {path}. Run 'sdeb init' first.")
+
+    raw = _load_raw_config(path)
+    projects = raw.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        raise SystemExit(f"No projects found in {path}. Run 'sdeb init' first.")
+
+    source = str(args.source)
+    if source not in projects:
+        raise SystemExit(f"Project '{source}' not found. Run 'sdeb project list' to see projects.")
+
+    dest = str(args.dest) if args.dest else _copy_name(source, projects)
+    if dest in projects:
+        raise SystemExit(
+            f"Project '{dest}' already exists. Choose another name or edit it with "
+            f"'sdeb project edit {dest}'."
+        )
+
+    source_data = projects.get(source)
+    if not isinstance(source_data, dict):
+        raise SystemExit(f"Project '{source}' config must be an object")
+
+    projects[dest] = ProjectConfig.from_dict(source_data).to_dict()
+    raw["active_project"] = dest
+    raw["projects"] = projects
+    _save_raw_config(path, raw)
+
+    print(_ok_text(f"Copied project '{source}' to '{dest}'"))
+    print(f"Active project is now {_ok_text(dest)}")
+    return 0
+
+
+def _cmd_project_remove(args: argparse.Namespace) -> int:
+    path = _config_path()
+    if args.remove_all:
+        if not path.exists():
+            print(f"No config found at {path}")
+            return 0
+        if not _prompt_bool(_warn_text(f"Delete all sdeb project settings at {path}?"), False):
+            print("Aborted.")
+            return 0
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise SystemExit(f"Failed to delete config file: {path}: {exc}") from exc
+        print(_ok_text(f"Deleted {path}"))
         return 0
 
-    if not _prompt_bool(f"Delete config at {path}?", False):
+    if not args.name:
+        raise SystemExit(
+            "Missing project name. Use 'sdeb project remove <name>' or "
+            "'sdeb project remove --all'."
+        )
+
+    if not path.exists():
+        raise SystemExit(f"No config found at {path}. Run 'sdeb init' first.")
+
+    raw = _load_raw_config(path)
+    projects = raw.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        raise SystemExit(f"No projects found in {path}. Run 'sdeb init' first.")
+
+    project = str(args.name)
+    if project not in projects:
+        raise SystemExit(f"Project '{project}' not found. Run 'sdeb project list' to see projects.")
+
+    if not _prompt_bool(_warn_text(f"Remove project '{project}'?"), False):
         print("Aborted.")
         return 0
 
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise SystemExit(f"Failed to delete config file: {path}: {exc}") from exc
+    del projects[project]
+    active = str(raw.get("active_project") or "")
+    if active == project:
+        raw["active_project"] = sorted(str(name) for name in projects.keys())[0] if projects else ""
+    raw["projects"] = projects
+    _save_raw_config(path, raw)
 
-    print(f"Deleted {path}")
+    print(_ok_text(f"Removed project '{project}'"))
+    if raw["active_project"]:
+        print(f"Active project is now {_ok_text(str(raw['active_project']))}")
+        print()
+        _print_projects(raw, path, title="Remaining projects")
+    else:
+        print("No projects remain. Run 'sdeb init' to create one.")
     return 0
 
 
-def _cmd_use(args: argparse.Namespace) -> int:
+def _cmd_project_use(args: argparse.Namespace) -> int:
     path = _config_path()
     if not path.exists():
-        raise SystemExit(f"No config found at {path}. Run 'sdeb set' first.")
+        raise SystemExit(f"No config found at {path}. Run 'sdeb init' first.")
 
     raw = _load_raw_config(path)
     projects = raw.get("projects")
     if not isinstance(projects, dict) or not projects:
-        raise SystemExit(f"No projects found in {path}. Run 'sdeb set' first.")
+        raise SystemExit(f"No projects found in {path}. Run 'sdeb init' first.")
 
-    project = str(args.project)
+    project = str(args.name)
     if project not in projects:
-        raise SystemExit(f"Project '{project}' not found. Run 'sdeb set' to create it.")
+        raise SystemExit(f"Project '{project}' not found. Run 'sdeb project list' to see projects.")
 
     raw["active_project"] = project
     _save_raw_config(path, raw)
-    print(f"Active project is now '{project}'")
+    print(f"Active project is now {_ok_text(project)}")
     return 0
 
 
-def _cmd_projects(args: argparse.Namespace) -> int:
+def _cmd_project_list(args: argparse.Namespace) -> int:
     del args
     path = _config_path()
-    if not path.exists():
-        raise SystemExit(f"No config found at {path}. Run 'sdeb set' first.")
-
     raw = _load_raw_config(path)
-    active = str(raw.get("active_project") or DEFAULT_PROJECT)
+    _print_projects(raw, path)
+    return 0
+
+
+def _print_projects(raw: dict[str, Any], path: Path, title: str = "Projects") -> None:
+    active = str(raw.get("active_project") or "")
     projects = raw.get("projects")
     if not isinstance(projects, dict) or not projects:
+        print(_cmd_text(title))
+        print()
         print("No projects found.")
-        return 0
+        print(_dim("Run 'sdeb init' to create one."))
+        print(_dim(f"Config: {path}"))
+        return
 
-    project_names = [str(name) for name in projects.keys()]
-    name_width = max(len(name) for name in project_names)
-
-    for name in sorted(project_names):
-        is_active = name == active
+    rows: list[tuple[str, str, str, str, str, str, str, str]] = []
+    for name in sorted(str(name) for name in projects.keys()):
         data = projects.get(name)
-        cfg = (
-            ProjectConfig.from_dict(data)
-            if isinstance(data, dict)
-            else ProjectConfig.from_dict({})
+        cfg = ProjectConfig.from_dict(data) if isinstance(data, dict) else ProjectConfig.from_dict({})
+        rows.append(
+            (
+                "*" if name == active else "",
+                name,
+                cfg.partition,
+                cfg.node if cfg.node else "auto",
+                cfg.time,
+                cfg.mem,
+                str(cfg.cpus_per_task),
+                str(cfg.gpus if cfg.gpus > 0 else 1) if cfg.gpu else "no",
+            )
         )
 
-        marker = _styled("*", "1;32") if is_active else " "
-        name_styled = _styled(name, "1;32") if is_active else _styled(name, "1")
-        name_padded = name_styled + (" " * (name_width - len(name)))
+    headers = ("active", "name", "partition", "node", "time", "mem", "cpus", "gpu")
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(value))
 
-        node = cfg.node if cfg.node else "auto"
-        gpu = f"gpu:{cfg.gpus if cfg.gpus > 0 else 1}" if cfg.gpu else "cpu"
-        details = (
-            f"partition={cfg.partition}  node={node}  time={cfg.time}  mem={cfg.mem}  "
-            f"cpus={cfg.cpus_per_task}  {gpu}"
-        )
-        details = _styled(details, "2")
+    def fmt(row: tuple[str, ...]) -> str:
+        return "  ".join(value.ljust(widths[index]) for index, value in enumerate(row))
 
-        print(f"{marker} {name_padded}  {details}")
+    print(_cmd_text(title))
+    print()
+    print("  " + _bold(fmt(headers)))
+    for row in rows:
+        marker_raw = row[0].ljust(widths[0])
+        name_raw = row[1].ljust(widths[1])
+        marker = _ok_text(marker_raw) if row[0] else marker_raw
+        name = _ok_text(name_raw) if row[1] == active else _bold(name_raw)
+        rest = "  ".join(row[index].ljust(widths[index]) for index in range(2, len(row)))
+        print("  " + "  ".join((marker, name, rest)))
 
-    hint = "Tip: use 'sdeb use <project>' to switch active project."
-    print(_styled(hint, "2"))
+    print()
+    if active:
+        print(f"Active project: {_ok_text(active)}")
+    else:
+        print(_warn_text("No active project set."))
+        print(_dim("Run 'sdeb project use <name>' to choose one."))
+    print(_dim(f"Config: {path}"))
+
+
+def _cmd_project_help(args: argparse.Namespace) -> int:
+    del args
+    _print_project_help()
     return 0
+
+
+def _cmd_help(args: argparse.Namespace) -> int:
+    del args
+    _print_main_help()
+    return 0
+
+
+def _cmd_legacy_purge(args: argparse.Namespace) -> int:
+    args.remove_all = True
+    args.name = None
+    return _cmd_project_remove(args)
+
+
+def _cmd_legacy_projects(args: argparse.Namespace) -> int:
+    return _cmd_project_list(args)
+
+
+def _cmd_legacy_use(args: argparse.Namespace) -> int:
+    args.name = args.project
+    return _cmd_project_use(args)
 
 
 def _apply_overrides(cfg: ProjectConfig, args: argparse.Namespace) -> ProjectConfig:
@@ -451,17 +652,16 @@ def _apply_overrides(cfg: ProjectConfig, args: argparse.Namespace) -> ProjectCon
     def override_int(current: int, value: int | None) -> int:
         return current if value is None else value
 
-    def override_bool(current: bool, value: bool | None) -> bool:
-        return current if value is None else value
-
-    gpu = override_bool(cfg.gpu, args.gpu)
-    gpus = override_int(cfg.gpus, getattr(args, "gpus", None))
-    if getattr(args, "gpus", None) is not None:
-        if args.gpus <= 0:
-            gpu = False
-        else:
-            gpu = True
-            gpus = args.gpus
+    gpu = cfg.gpu
+    gpus = cfg.gpus
+    if args.cpu:
+        gpu = False
+        gpus = 1
+    elif args.gpu is not None:
+        if args.gpu <= 0:
+            raise SystemExit("--gpu must be 1 or greater. Use --cpu for CPU-only jobs.")
+        gpu = True
+        gpus = args.gpu
 
     return ProjectConfig(
         account=override_str(cfg.account, args.account),
@@ -479,10 +679,12 @@ def _apply_overrides(cfg: ProjectConfig, args: argparse.Namespace) -> ProjectCon
 def _cmd_run(args: argparse.Namespace) -> int:
     path = _config_path()
     if not path.exists():
-        raise SystemExit(f"No config found at {path}. Run 'sdeb set' first.")
+        raise SystemExit(f"No config found at {path}. Run 'sdeb init' first.")
     raw = _load_raw_config(path)
 
-    project = args.project or str(raw.get("active_project") or DEFAULT_PROJECT)
+    project = args.project or str(raw.get("active_project") or "")
+    if not project:
+        raise SystemExit("No active project set. Run 'sdeb project list' or 'sdeb init'.")
     cfg = _get_project_config(raw, project)
     cfg = _apply_overrides(cfg, args)
 
@@ -497,47 +699,191 @@ def _cmd_run(args: argparse.Namespace) -> int:
     raise AssertionError("execvp should not return")
 
 
+def _help_row(command: str, description: str, *, warn: bool = False) -> str:
+    padded = command.ljust(32)
+    command_text = _warn_text(padded) if warn else _cmd_text(padded)
+    return f"  {command_text} {description}"
+
+
+def _print_main_help() -> None:
+    print(_cmd_text("sdeb"))
+    print("Run SLURM shells with saved project defaults.")
+    print()
+    print(_bold("Usage"))
+    print(f"  {_cmd_text('sdeb')} [run options]")
+    print(f"  {_cmd_text('sdeb init')} [name]")
+    print(f"  {_cmd_text('sdeb project')} <command>")
+    print()
+    print(_bold("Common Commands"))
+    print(_help_row("sdeb init [name]", "Create a new project from default settings"))
+    print(_help_row("sdeb", "Run srun with the active project"))
+    print(_help_row("sdeb --dry-run", "Preview the srun command"))
+    print(_help_row("sdeb project list", "Show saved projects"))
+    print(_help_row("sdeb project use <name>", "Switch active project"))
+    print(_help_row("sdeb project edit <name>", "Edit an existing project"))
+    print()
+    print(_bold("Project Commands"))
+    print(_help_row("sdeb project new [name]", "Create a project from code defaults"))
+    print(_help_row("sdeb project copy <src> [dst]", "Copy a project config"))
+    print(_help_row("sdeb project remove <name>", "Remove one project"))
+    print(_help_row("sdeb project remove --all", "Remove all project settings", warn=True))
+    print()
+    print(_bold("Run Options"))
+    print(_help_row("--project <name>", "Use a project without switching active project"))
+    print(_help_row("--partition <name>", "Override SLURM partition"))
+    print(_help_row("--time HH:MM:SS", "Override time limit"))
+    print(_help_row("--mem 8G", "Override memory"))
+    print(_help_row("--cpus-per-task N", "Override CPU count"))
+    print(_help_row("--cpu", "Force a CPU-only job"))
+    print(_help_row("--gpu [N]", "Force a GPU job; default N is 1"))
+    print(_help_row("--dry-run", "Print command without running it"))
+    print()
+    print(_bold("Examples"))
+    print(f"  {_cmd_text('sdeb init gpu-test')}")
+    print(f"  {_cmd_text('sdeb project list')}")
+    print(f"  {_cmd_text('sdeb project copy gpu-test gpu-long')}")
+    print(f"  {_cmd_text('sdeb --project gpu-test --gpu 2 --dry-run')}")
+    print()
+    print(_dim("Use 'sdeb project help' for project lifecycle commands."))
+
+
+def _print_project_help() -> None:
+    print(_cmd_text("sdeb project"))
+    print("Manage saved SLURM project defaults.")
+    print()
+    print(_bold("Usage"))
+    print(f"  {_cmd_text('sdeb project')} <command>")
+    print()
+    print(_bold("Commands"))
+    print(_help_row("list", "List projects and show the active one"))
+    print(_help_row("new [name]", "Create a new project from defaults"))
+    print(_help_row("edit <name>", "Edit an existing project"))
+    print(_help_row("copy <source> [dest]", "Copy a project config"))
+    print(_help_row("use <name>", "Make a project active"))
+    print(_help_row("remove <name>", "Remove one project"))
+    print(_help_row("remove --all", "Remove all project settings", warn=True))
+    print()
+    print(_bold("Recommended Flow"))
+    print(f"  1. {_cmd_text('sdeb init myproj')}")
+    print(f"  2. {_cmd_text('sdeb project list')}")
+    print(f"  3. {_cmd_text('sdeb')}")
+    print(f"  4. {_cmd_text('sdeb project edit myproj')}")
+    print()
+    print(_bold("Safety"))
+    print(f"  {_warn_text('remove')} asks for confirmation.")
+    print(f"  {_warn_text('remove --all')} asks for confirmation and deletes the config file.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sdeb",
         description="Interactive helper for spawning SLURM shells via srun.",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"sdeb {__version__}",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand")
 
-    set_parser = subparsers.add_parser(
-        "set", help="Interactively set defaults for a project"
-    )
-    set_parser.add_argument(
-        "--project",
-        help="Project name to prefill (you can still change it interactively)",
-    )
-    set_parser.set_defaults(_handler=_cmd_set)
+    help_parser = subparsers.add_parser("help", help="Show task-oriented help")
+    help_parser.set_defaults(_handler=_cmd_help)
 
-    purge_parser = subparsers.add_parser(
-        "purge",
-        help="Delete the saved config (asks for confirmation)",
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Create a new project from default settings",
     )
-    purge_parser.set_defaults(_handler=_cmd_purge)
+    init_parser.add_argument("name", nargs="?", help="Project name")
+    init_parser.set_defaults(_handler=_cmd_project_new)
 
-    clean_parser = subparsers.add_parser(
-        "clean",
-        help="Alias for purge",
+    project_parser = subparsers.add_parser(
+        "project",
+        help="Manage saved project settings",
     )
-    clean_parser.set_defaults(_handler=_cmd_purge)
+    project_parser.set_defaults(_handler=_cmd_project_help)
+    project_subparsers = project_parser.add_subparsers(dest="project_command")
 
-    projects_parser = subparsers.add_parser(
-        "projects",
-        help="List configured projects (highlights the active one)",
+    project_help_parser = project_subparsers.add_parser(
+        "help",
+        help="Show project command help",
     )
-    projects_parser.set_defaults(_handler=_cmd_projects)
+    project_help_parser.set_defaults(_handler=_cmd_project_help)
 
-    use_parser = subparsers.add_parser(
+    project_list_parser = project_subparsers.add_parser(
+        "list",
+        aliases=["ls"],
+        help="List configured projects",
+    )
+    project_list_parser.set_defaults(_handler=_cmd_project_list)
+
+    project_new_parser = project_subparsers.add_parser(
+        "new",
+        help="Create a new project from default settings",
+    )
+    project_new_parser.add_argument("name", nargs="?", help="Project name")
+    project_new_parser.set_defaults(_handler=_cmd_project_new)
+
+    project_edit_parser = project_subparsers.add_parser(
+        "edit",
+        help="Edit an existing project",
+    )
+    project_edit_parser.add_argument("name", help="Project name")
+    project_edit_parser.set_defaults(_handler=_cmd_project_edit)
+
+    project_copy_parser = project_subparsers.add_parser(
+        "copy",
+        help="Copy an existing project config",
+    )
+    project_copy_parser.add_argument("source", help="Project to copy")
+    project_copy_parser.add_argument("dest", nargs="?", help="New project name")
+    project_copy_parser.set_defaults(_handler=_cmd_project_copy)
+
+    project_use_parser = project_subparsers.add_parser(
         "use",
         help="Switch the active project",
     )
+    project_use_parser.add_argument("name", help="Project name")
+    project_use_parser.set_defaults(_handler=_cmd_project_use)
+
+    project_remove_parser = project_subparsers.add_parser(
+        "remove",
+        aliases=["rm"],
+        help="Remove one project or all settings",
+    )
+    project_remove_parser.add_argument("name", nargs="?", help="Project name")
+    project_remove_parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="remove_all",
+        help="Remove all project settings",
+    )
+    project_remove_parser.set_defaults(_handler=_cmd_project_remove, remove_all=False)
+
+    purge_parser = subparsers.add_parser(
+        "purge",
+        help="Alias for 'project remove --all'",
+    )
+    purge_parser.set_defaults(_handler=_cmd_legacy_purge)
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Alias for 'project remove --all'",
+    )
+    clean_parser.set_defaults(_handler=_cmd_legacy_purge)
+
+    projects_parser = subparsers.add_parser(
+        "projects",
+        help="Alias for 'project list'",
+    )
+    projects_parser.set_defaults(_handler=_cmd_legacy_projects)
+
+    use_parser = subparsers.add_parser(
+        "use",
+        help="Alias for 'project use'",
+    )
     use_parser.add_argument("project", help="Project name to activate")
-    use_parser.set_defaults(_handler=_cmd_use)
+    use_parser.set_defaults(_handler=_cmd_legacy_use)
 
     def add_run_flags(p: argparse.ArgumentParser) -> None:
         p.add_argument("--project", help="Project to use (defaults to active project)")
@@ -547,16 +893,19 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--time", help="Time limit, e.g. 00:20:00")
         p.add_argument("--mem", help="Memory, e.g. 8G")
         p.add_argument("--cpus-per-task", type=int, dest="cpus_per_task")
-        p.add_argument(
-            "--gpu",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help="Enable/disable requesting GPUs (see also --gpus)",
+        gpu_group = p.add_mutually_exclusive_group()
+        gpu_group.add_argument(
+            "--cpu",
+            action="store_true",
+            help="Force a CPU-only job for this run",
         )
-        p.add_argument(
-            "--gpus",
+        gpu_group.add_argument(
+            "--gpu",
+            nargs="?",
+            const=1,
             type=int,
-            help="Number of GPUs to request (implies --gpu). Use 0 for none.",
+            metavar="N",
+            help="Force a GPU job; defaults to 1 GPU when N is omitted",
         )
         p.add_argument(
             "--pty-command",
