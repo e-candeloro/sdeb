@@ -70,6 +70,8 @@ class ProjectConfig:
 def _ansi_enabled() -> bool:
     if os.environ.get("NO_COLOR") is not None:
         return False
+    if os.environ.get("FORCE_COLOR") is not None:
+        return True
     term = os.environ.get("TERM", "")
     if not term or term == "dumb":
         return False
@@ -356,6 +358,92 @@ def _cmd_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_purge(args: argparse.Namespace) -> int:
+    del args
+    path = _config_path()
+    if not path.exists():
+        print(f"No config found at {path}")
+        return 0
+
+    if not _prompt_bool(f"Delete config at {path}?", False):
+        print("Aborted.")
+        return 0
+
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise SystemExit(f"Failed to delete config file: {path}: {exc}") from exc
+
+    print(f"Deleted {path}")
+    return 0
+
+
+def _cmd_use(args: argparse.Namespace) -> int:
+    path = _config_path()
+    if not path.exists():
+        raise SystemExit(f"No config found at {path}. Run 'sdeb set' first.")
+
+    raw = _load_raw_config(path)
+    projects = raw.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        raise SystemExit(f"No projects found in {path}. Run 'sdeb set' first.")
+
+    project = str(args.project)
+    if project not in projects:
+        raise SystemExit(f"Project '{project}' not found. Run 'sdeb set' to create it.")
+
+    raw["active_project"] = project
+    _save_raw_config(path, raw)
+    print(f"Active project is now '{project}'")
+    return 0
+
+
+def _cmd_projects(args: argparse.Namespace) -> int:
+    del args
+    path = _config_path()
+    if not path.exists():
+        raise SystemExit(f"No config found at {path}. Run 'sdeb set' first.")
+
+    raw = _load_raw_config(path)
+    active = str(raw.get("active_project") or DEFAULT_PROJECT)
+    projects = raw.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        print("No projects found.")
+        return 0
+
+    project_names = [str(name) for name in projects.keys()]
+    name_width = max(len(name) for name in project_names)
+
+    for name in sorted(project_names):
+        is_active = name == active
+        data = projects.get(name)
+        cfg = (
+            ProjectConfig.from_dict(data)
+            if isinstance(data, dict)
+            else ProjectConfig.from_dict({})
+        )
+
+        marker = _styled("*", "1;32") if is_active else " "
+        name_styled = _styled(name, "1;32") if is_active else _styled(name, "1")
+        name_padded = name_styled + (" " * (name_width - len(name)))
+
+        node = cfg.node if cfg.node else "auto"
+        gpu = f"gpu:{cfg.gpus if cfg.gpus > 0 else 1}" if cfg.gpu else "cpu"
+        details = (
+            f"partition={cfg.partition}  node={node}  time={cfg.time}  mem={cfg.mem}  "
+            f"cpus={cfg.cpus_per_task}  {gpu}"
+        )
+        details = _styled(details, "2")
+
+        print(f"{marker} {name_padded}  {details}")
+
+    hint = "Tip: use 'sdeb use <project>' to switch active project."
+    print(_styled(hint, "2"))
+    return 0
+
+
 def _apply_overrides(cfg: ProjectConfig, args: argparse.Namespace) -> ProjectConfig:
     def override_str(current: str, value: str | None) -> str:
         return current if value is None else value
@@ -425,6 +513,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Project name to prefill (you can still change it interactively)",
     )
     set_parser.set_defaults(_handler=_cmd_set)
+
+    purge_parser = subparsers.add_parser(
+        "purge",
+        help="Delete the saved config (asks for confirmation)",
+    )
+    purge_parser.set_defaults(_handler=_cmd_purge)
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Alias for purge",
+    )
+    clean_parser.set_defaults(_handler=_cmd_purge)
+
+    projects_parser = subparsers.add_parser(
+        "projects",
+        help="List configured projects (highlights the active one)",
+    )
+    projects_parser.set_defaults(_handler=_cmd_projects)
+
+    use_parser = subparsers.add_parser(
+        "use",
+        help="Switch the active project",
+    )
+    use_parser.add_argument("project", help="Project name to activate")
+    use_parser.set_defaults(_handler=_cmd_use)
 
     def add_run_flags(p: argparse.ArgumentParser) -> None:
         p.add_argument("--project", help="Project to use (defaults to active project)")
