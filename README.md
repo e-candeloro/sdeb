@@ -6,6 +6,8 @@
 
 > Save SLURM `srun` defaults per project and launch interactive shells without retyping long commands.
 
+![sdeb demo](media/demo.gif)
+
 `sdeb` is a small CLI for interactive SLURM sessions. It stores the account, partition, node, time, memory, CPU count, GPU request, and PTY command you normally pass to `srun`, then reuses them with one command.
 
 ---
