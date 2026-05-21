@@ -46,6 +46,20 @@ curl -LsSf https://astral.sh/uv/install.sh | sh  # install uv itself once
 uv tool install git+https://github.com/e-candeloro/sdeb
 ```
 
+If `uv` warns that the tool directory is not on `PATH`, either run:
+
+```bash
+uv tool update-shell
+```
+
+or install into a known user bin directory that is already on `PATH`:
+
+```bash
+UV_TOOL_BIN_DIR="$HOME/.local/bin" uv tool install git+https://github.com/e-candeloro/sdeb
+```
+
+When installing from a Snap-packaged editor terminal, `$HOME` can point inside the Snap sandbox. In that case, install from a normal terminal or set `UV_TOOL_BIN_DIR` to your real user bin directory, for example `/home/$USER/.local/bin`.
+
 Upgrade later:
 
 ```bash
