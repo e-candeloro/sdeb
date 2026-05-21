@@ -13,7 +13,7 @@ from typing import Any
 try:
     from . import __version__
 except ImportError:  # pragma: no cover - supports direct script execution.
-    __version__ = "0.2.0"
+    __version__ = "0.2.1"
 
 
 DEFAULT_PROJECT = "default"
