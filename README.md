@@ -15,7 +15,7 @@
 Interactive SLURM commands get long quickly:
 
 ```bash
-srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
+srun --partition=debug -w compute-01 --account=my_account --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
 ```
 
 With `sdeb`, save that once as a project:
@@ -133,9 +133,9 @@ sdeb --project myproj
 Override SLURM resources for a single run:
 
 ```bash
-sdeb --partition all_serial
-sdeb --node ailb-login-02
-sdeb --account bolelli_synthetic
+sdeb --partition debug
+sdeb --node compute-01
+sdeb --account my_account
 sdeb --time 01:00:00
 sdeb --mem 16G
 sdeb --cpus-per-task 16
@@ -166,17 +166,17 @@ sdeb --version
 
 ## Generated SLURM Command
 
-A project configured with account `bolelli_synthetic`, partition `all_serial`, node `ailb-login-02`, 20 minutes, 8 GB RAM, 8 CPUs, and one GPU generates:
+A project configured with account `my_account`, partition `debug`, node `compute-01`, 20 minutes, 8 GB RAM, 8 CPUs, and one GPU generates:
 
 ```bash
-srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
+srun --partition=debug -w compute-01 --account=my_account --time=00:20:00 --mem=8G --cpus-per-task=8 --gres=gpu:1 --pty bash
 ```
 
 CPU override removes the GPU request:
 
 ```bash
 sdeb --cpu --dry-run
-# srun --partition=all_serial -w ailb-login-02 --account=bolelli_synthetic --time=00:20:00 --mem=8G --cpus-per-task=8 --pty bash
+# srun --partition=debug -w compute-01 --account=my_account --time=00:20:00 --mem=8G --cpus-per-task=8 --pty bash
 ```
 
 ---
