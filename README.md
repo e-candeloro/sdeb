@@ -1,4 +1,4 @@
-# sdeb
+# 🐛 SDEB - Slurm Debugging Made Easy
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://docs.astral.sh/uv/)
